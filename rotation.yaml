@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────
+#  Réglages de la playlist tournante Kemet.
+#  Modifiable directement sur GitHub (icône crayon) :
+#  le changement s'applique dès le lendemain matin.
+# ─────────────────────────────────────────────────────────────
+
+playlist:
+  title: "Kemet Exotique — Sons du jour"
+  description: "Afro, zouk, makossa, mbalax, maloya… La playlist se renouvelle chaque matin."
+  privacy: unlisted            # private | unlisted | public
+
+# Nombre de morceaux dans la playlist (150 ≈ 10 h de musique)
+taille: 150
+
+# Morceaux remplacés chaque matin (les plus anciens sortent)
+# 40 par jour = playlist entièrement renouvelée en un peu moins de 4 jours
+renouvellement_par_jour: 40
+
+# Répartition des nouveaux morceaux (en %)
+melange:
+  coeur_de_cible: 60           # Antilles-Guyane, Réunion-Maurice-Madagascar, Mayotte-Comores, Cameroun, Sénégal, afro urbain FR
+  elargie: 40                  # reste de l'Afrique, Cap-Vert/Angola, Caraïbes
+
+# Zone mise en avant (facultatif) : colle au « pays à l'honneur » de la semaine.
+# Laisse vide ("") pour désactiver. Noms possibles : voir la colonne Zone de bibliotheque.csv
+zone_a_l_honneur: ""
+part_zone_a_l_honneur: 20      # % des nouveaux morceaux réservés à cette zone (petites zones : voir README)
+
+# Pas plus de X morceaux d'un même artiste dans la playlist en même temps
+max_par_artiste: 3
+
+# Quota YouTube : 10 000 unités par jour. On garde une marge.
+budget_quota: 9000
