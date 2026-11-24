@@ -33,16 +33,27 @@ COEUR = {
     "Antilles, Guyane & Haïti", "Réunion, Maurice & Madagascar", "Mayotte & Comores",
     "Cameroun", "Sénégal", "Afro urbain France",
 }
-COST = {"read": 1, "search": 100, "insert": 50, "delete": 50}
+# Quota principal (10 000 unités/jour). Les recherches ont leur PROPRE limite
+# (100 appels/jour par défaut depuis fin 2025) et ne puisent pas dans ce quota.
+COST = {"read": 1, "search": 0, "insert": 50, "delete": 50}
 
 
 class QuotaReached(Exception):
     pass
 
 
+class SearchLimit(Exception):
+    pass
+
+
 class Budget:
-    def __init__(self, limit: int):
+    def __init__(self, limit: int, search_limit: int = 95):
         self.limit, self.used = limit, 0
+        self.search_limit, self.searches = search_limit, 0
+        self.search_blocked = False
+
+    def can_search(self) -> bool:
+        return not self.search_blocked and self.searches < self.search_limit
 
     def can(self, op: str) -> bool:
         return self.used + COST[op] <= self.limit
@@ -76,8 +87,13 @@ def save_json(path: Path, data: dict):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
 
 
+def is_search_quota_error(err) -> bool:
+    return "Search Queries" in str(err)
+
+
 def is_quota_error(err) -> bool:
-    return "quotaExceeded" in str(err) or "dailyLimitExceeded" in str(err)
+    s = str(err)
+    return any(x in s for x in ("quotaExceeded", "dailyLimitExceeded", "Quota exceeded for quota metric"))
 
 
 def is_playlist_missing(err) -> bool:
@@ -213,9 +229,17 @@ def current_items(yt, playlist_id, budget: Budget) -> list[dict]:
 
 
 def search(yt, t: dict, budget: Budget) -> str | None:
-    budget.spend("search")
-    res = yt.search().list(part="id", q=f"{t['title']} {t['artist']}", type="video",
-                           videoCategoryId="10", maxResults=1, regionCode="FR").execute()
+    if not budget.can_search():
+        raise SearchLimit()
+    budget.searches += 1
+    try:
+        res = yt.search().list(part="id", q=f"{t['title']} {t['artist']}", type="video",
+                               videoCategoryId="10", maxResults=1, regionCode="FR").execute()
+    except Exception as err:  # noqa: BLE001
+        if is_search_quota_error(err):
+            budget.search_blocked = True   # limite de recherches du jour atteinte
+            raise SearchLimit()
+        raise
     items = res.get("items", [])
     return items[0]["id"]["videoId"] if items else None
 
@@ -234,7 +258,7 @@ def main():
             by_video[v] = k
     by_key = {t["key"]: t for t in library}
 
-    budget = Budget(cfg["budget_quota"])
+    budget = Budget(cfg["budget_quota"], cfg.get("recherches_par_jour", 95))
     yt = youtube_client()
     stats = {"retirés": 0, "ajoutés": 0, "recherches": 0, "introuvables": 0}
 
@@ -277,18 +301,24 @@ def main():
                 artist_count[a] = artist_count.get(a, 0) + 1
         in_playlist |= {by_video[v] for v in leaving if v in by_video}   # pas de retour immédiat
 
-        candidates = pick_candidates(library, cfg, set(in_playlist), artist_count, plays, cache, n_add * 2)
+        candidates = pick_candidates(library, cfg, set(in_playlist), artist_count, plays, cache, n_add * 4)
         added = 0
         failures = 0
+        playlist_vids = {i["video_id"] for i in items}   # sécurité anti-doublon, même sans mémoire
         for t in candidates:
             if added >= n_add:
                 break
             pending_delete = COST["delete"] if to_remove else 0
             vid = cache.get(t["key"])
             if vid is None and t["key"] not in cache:
-                if budget.used + COST["search"] + COST["insert"] + pending_delete > budget.limit:
+                if budget.used + COST["insert"] + pending_delete > budget.limit:
                     break
-                vid = search(yt, t, budget)
+                if not budget.can_search():
+                    continue           # plus de recherches aujourd'hui : on prend des titres déjà trouvés
+                try:
+                    vid = search(yt, t, budget)
+                except SearchLimit:
+                    continue
                 stats["recherches"] += 1
                 cache[t["key"]] = vid
                 if vid:
@@ -297,6 +327,10 @@ def main():
                     stats["introuvables"] += 1
                     continue
             if not vid:
+                continue
+            if vid in playlist_vids:
+                plays.setdefault(t["key"], today)   # déjà dans la playlist : on le note et on passe
+                by_video[vid] = t["key"]
                 continue
             if dry:
                 print(f"  + [{t['zone']}] {t['artist']} — {t['title']}")
@@ -325,6 +359,7 @@ def main():
                     continue
                 raise
             items.append({"item_id": "", "video_id": vid, "added": today})
+            playlist_vids.add(vid)
             plays[t["key"]] = today
             added += 1
             stats["ajoutés"] = added
@@ -336,9 +371,12 @@ def main():
             upcoming = [t for t in sorted(library, key=lambda t: queue_order(t, plays))
                         if t["key"] not in cache]
             for t in upcoming:
-                if not budget.can("search"):
+                if not budget.can_search():
                     break
-                vid = search(yt, t, budget)
+                try:
+                    vid = search(yt, t, budget)
+                except SearchLimit:
+                    break
                 stats["recherches"] += 1
                 cache[t["key"]] = vid
                 if not vid:
@@ -363,6 +401,8 @@ def main():
     print(f"🎶 Aujourd'hui : {stats['retirés']} retirés, {stats['ajoutés']} ajoutés, "
           f"{stats['recherches']} recherches ({stats['introuvables']} introuvables). "
           f"Quota utilisé : {budget.used}/{budget.limit}")
+    if budget.search_blocked:
+        print("ℹ️  Limite de 100 recherches YouTube du jour atteinte : les prochains titres seront cherchés demain.")
     print(f"📚 Bibliothèque : {len(library)} titres, {found} déjà trouvés sur YouTube, "
           f"{never} jamais encore passés.")
     if not dry and 'playlist_id' in locals():
