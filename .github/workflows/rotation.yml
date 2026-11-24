@@ -2,7 +2,7 @@ name: Playlist tournante Kemet
 
 on:
   schedule:
-    - cron: "23 6 * * *"
+    - cron: "23 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -37,5 +37,10 @@ jobs:
           git config user.name "playlist-bot"
           git config user.email "playlist-bot@users.noreply.github.com"
           git add cache.json passages.json 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "Rotation playlist $(date -u +%F)"
-          git push
+          git diff --cached --quiet && exit 0
+          git commit -m "Rotation playlist $(date -u +%F)"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            sleep 5
+          done
+          exit 1
