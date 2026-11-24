@@ -18,6 +18,7 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,9 +80,28 @@ def is_quota_error(err) -> bool:
     return "quotaExceeded" in str(err) or "dailyLimitExceeded" in str(err)
 
 
+def is_playlist_missing(err) -> bool:
+    return "playlistNotFound" in str(err)
+
+
 def is_gone_error(err) -> bool:
+    """La VIDÉO (ou l'élément de playlist) n'existe plus ou est bloquée — pas la playlist."""
     s = str(err)
-    return any(x in s for x in ("videoNotFound", "forbidden", "playlistItemsNotAccessible", "404"))
+    if is_playlist_missing(err):
+        return False
+    return any(x in s for x in ("videoNotFound", "playlistItemNotFound", "videoNotAvailable", "forbidden"))
+
+
+def with_retry(call, tries: int = 6, wait: int = 5):
+    """Une playlist toute neuve met parfois quelques secondes à être visible par l'API."""
+    for attempt in range(tries):
+        try:
+            return call()
+        except Exception as err:  # noqa: BLE001
+            if is_playlist_missing(err) and attempt < tries - 1:
+                time.sleep(wait)
+                continue
+            raise
 
 
 def load_library() -> list[dict]:
@@ -166,6 +186,7 @@ def get_or_create_playlist(yt, cfg, budget: Budget) -> str:
         "status": {"privacyStatus": cfg["playlist"]["privacy"]},
     }).execute()
     print(f"🆕 Playlist créée : {title}")
+    time.sleep(10)
     return created["id"]
 
 
@@ -174,7 +195,7 @@ def current_items(yt, playlist_id, budget: Budget) -> list[dict]:
     req = yt.playlistItems().list(part="snippet,contentDetails", playlistId=playlist_id, maxResults=50)
     while req:
         budget.spend("read")
-        res = req.execute()
+        res = with_retry(req.execute)
         for it in res.get("items", []):
             items.append({"item_id": it["id"], "video_id": it["contentDetails"]["videoId"],
                           "added": it["snippet"].get("publishedAt", "")})
@@ -249,6 +270,7 @@ def main():
 
         candidates = pick_candidates(library, cfg, set(in_playlist), artist_count, plays, cache, n_add * 2)
         added = 0
+        failures = 0
         for t in candidates:
             if added >= n_add:
                 break
@@ -275,17 +297,22 @@ def main():
             if budget.used + COST["insert"] + pending_delete > budget.limit:
                 break
             budget.spend("insert")
+            body = {"snippet": {
+                "playlistId": playlist_id,
+                "position": random.randint(0, len(items)),
+                "resourceId": {"kind": "youtube#video", "videoId": vid},
+            }}
             try:
-                yt.playlistItems().insert(part="snippet", body={"snippet": {
-                    "playlistId": playlist_id,
-                    "position": random.randint(0, len(items)),
-                    "resourceId": {"kind": "youtube#video", "videoId": vid},
-                }}).execute()
+                with_retry(lambda: yt.playlistItems().insert(part="snippet", body=body).execute())
+                failures = 0
             except Exception as err:  # noqa: BLE001
                 if is_quota_error(err):
                     raise QuotaReached()
                 if is_gone_error(err):
                     cache[t["key"]] = None   # vidéo supprimée ou bloquée : on ne la reprendra plus
+                    failures += 1
+                    if failures >= 5:
+                        raise RuntimeError("5 ajouts refusés d'affilée : arrêt par sécurité. Dernière erreur : " + str(err))
                     continue
                 raise
             items.append({"item_id": "", "video_id": vid, "added": today})
