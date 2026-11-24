@@ -1,6 +1,6 @@
 """
 Playlist tournante : chaque matin, les morceaux les plus anciens sortent
-et de nouveaux morceaux de bibliotheque.csv entrent à des positions au hasard.
+et de nouveaux morceaux de bibliotheque.csv entrent en fin de playlist.
 
 - Les morceaux jamais passés sont prioritaires, puis ceux passés il y a le plus longtemps.
 - Chaque titre n'est cherché sur YouTube qu'une seule fois (résultat gardé dans cache.json),
@@ -92,14 +92,23 @@ def is_gone_error(err) -> bool:
     return any(x in s for x in ("videoNotFound", "playlistItemNotFound", "videoNotAvailable", "forbidden"))
 
 
-def with_retry(call, tries: int = 6, wait: int = 5):
-    """Une playlist toute neuve met parfois quelques secondes à être visible par l'API."""
+def is_transient(err) -> bool:
+    """Refus passagers de YouTube : il suffit d'attendre un peu et de réessayer."""
+    s = str(err)
+    return any(x in s for x in ("SERVICE_UNAVAILABLE", "operation was aborted", "backendError",
+                                "internalError", "HttpError 500", "HttpError 502", "HttpError 503",
+                                "HttpError 409"))
+
+
+def with_retry(call, tries: int = 6, wait: int = 3):
+    """Réessaie si la playlist est trop récente pour être visible, ou si YouTube refuse
+    passagèrement (erreur 409 « operation aborted », 500, 503…). Attentes : 3, 6, 12, 24, 48 s."""
     for attempt in range(tries):
         try:
             return call()
         except Exception as err:  # noqa: BLE001
-            if is_playlist_missing(err) and attempt < tries - 1:
-                time.sleep(wait)
+            if (is_playlist_missing(err) or is_transient(err)) and attempt < tries - 1:
+                time.sleep(wait * (2 ** attempt))
                 continue
             raise
 
@@ -243,7 +252,7 @@ def main():
         def delete(it):
             budget.spend("delete")
             try:
-                yt.playlistItems().delete(id=it["item_id"]).execute()
+                with_retry(lambda: yt.playlistItems().delete(id=it["item_id"]).execute())
             except Exception as err:  # noqa: BLE001
                 if is_quota_error(err):
                     raise QuotaReached()
@@ -299,9 +308,9 @@ def main():
             budget.spend("insert")
             body = {"snippet": {
                 "playlistId": playlist_id,
-                "position": random.randint(0, len(items)),
                 "resourceId": {"kind": "youtube#video", "videoId": vid},
             }}
+            time.sleep(1)   # YouTube supporte mal les ajouts trop rapprochés dans une même playlist
             try:
                 with_retry(lambda: yt.playlistItems().insert(part="snippet", body=body).execute())
                 failures = 0
