@@ -2,7 +2,7 @@ name: Playlist tournante Kemet
 
 on:
   schedule:
-    - cron: "23 8 * * *"
+    - cron: "15 6 * * *"
   workflow_dispatch:
 
 permissions:
